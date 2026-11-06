@@ -1,0 +1,10 @@
+misc/
+.DS_Store
+
+.venv/
+.env
+*.db
+*.sqlite
+*.sqlite3
+__pycache__/
+CLAUDE.local.md
