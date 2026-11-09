@@ -63,15 +63,15 @@ Stack: Python standard library only (`argparse`, `sqlite3`, `datetime`, `csv`), 
 | changed_at | TEXT NOT NULL (UTC ISO-8601) |
 
 ## Commands
-Run as `python main.py [--now ISO_TIMESTAMP] <command>`. `--now` goes before the command and defaults to the real clock in `main.py` only. Rule functions always receive `now` as a parameter.
+Run as `python main.py [--db PATH] [--now ISO_TIMESTAMP] <command>`. Both global options go before the command. The database defaults to `baggage.db` in the current working directory; `--db` selects an isolated database for tests and demonstrations. `--now` defaults to the real UTC clock in `main.py` only. Rule functions always receive a timezone-aware `now` as a parameter.
 
 | Command | Behaviour |
 |---|---|
-| `file` | Files a claim from passenger, flight, type, tier, optional note and actor. |
+| `file` | Files a claim from passenger, flight, type, tier, an optional note and required `--actor`. |
 | `list` | Lists claims, with optional `--status` and `--tier` filters. |
-| `assign` | Assigns an agent and moves the claim to `assigned`. |
-| `resolve` | Moves the claim to `resolved`. |
-| `close` | Moves the claim to `closed`. |
+| `assign` | Requires `--agent` and `--actor`; assigns the agent and moves the claim to `assigned`. |
+| `resolve` | Requires `--actor`; moves the claim to `resolved`. |
+| `close` | Requires `--actor`; moves the claim to `closed`. |
 | `escalate` | Escalates every overdue open or assigned claim and reports the escalated IDs. |
 | `history` | Shows a claim's history in time order. |
 | `seed <csv_path>` | Files claims from a CSV file. |
@@ -115,20 +115,22 @@ Covers commands, `--now` and seed.
 | Risk | Mitigation |
 |---|---|
 | **Time handling.** Mixed timezones or naive timestamps make overdue checks wrong or flaky. | Store UTC ISO-8601 only. Reject `--now` values without a clear format. Rule functions take `now`, so tests never touch the clock. Test the exact-deadline boundary. |
-| **Atomicity.** Python's `sqlite3` opens transactions implicitly, and a partial write (claim without history) would corrupt the audit trail. | Wrap each claim-plus-history write in one explicit `with conn:` block. Test rollback by forcing the history insert to fail. |
+| **Atomicity.** Python's `sqlite3` opens transactions implicitly, and a partial write (claim without history) would corrupt the audit trail. | Give each operation an explicit transaction boundary covering claim and history. Seed owns one outer transaction for all rows; its filing helper must not commit independently or use nested connection context managers that commit early. Test rollback by forcing the history insert to fail. |
 | **Rules drift between code and database.** The CHECK constraints and the Python validation could disagree. | Define the type, tier and status lists once in `claims.py` and build the CHECK clauses from them in `db.py`. Test that bad values fail both layers. |
-| **Seed leaves a half-loaded database.** One bad CSV row could leave earlier rows saved. | Validate and load the whole file in one transaction (all or nothing), with errors naming the row. Pending decision 5. |
+| **Seed leaves a half-loaded database.** One bad CSV row could leave earlier rows saved. | Validate and load the whole file in one transaction (all or nothing), with errors naming the row. Verify that a later invalid row or history failure leaves neither imported claims nor their history. |
 | **Foreign keys off by default in SQLite.** History could reference missing claims. | Run `PRAGMA foreign_keys = ON` on every connection in `db.py`. |
 
-## Decisions to settle
-1. **Actor source.** Filing and status commands need an actor. Options are a required `--actor` flag or a default. Escalation uses the fixed value `system`. Proposed: `--actor` required on `file`, `assign`, `resolve` and `close`.
-2. **Assigned agent.** Is it free-text or a row in an agents table? You listed only claims and history, so proposed: free-text.
-3. **Agent required on every move into `assigned`**, including `escalated → assigned`. Can an already assigned claim be reassigned? The table says no (`assigned → assigned` is not allowed). Proposed: no reassignment.
-4. **Note.** Is it set at filing only, or can later commands update it? History has no note column. Proposed: filing only.
-5. **Seed CSV format.** The columns, whether each row's filed time comes from the CSV or from `--now`, and whether a bad row aborts the whole file or skips that row. Proposed columns: `passenger,flight,type,tier,note`. Filed time is `--now`, actor is `seed`, and a bad row aborts the whole file.
-6. **Escalation atomicity.** Is it one transaction for the whole run or one per claim? Proposed: one per claim, so one failure doesn't block the rest, and failures are reported.
-7. **ID format.** Integer autoincrement. Say so if you want prefixed IDs like `BC-0001`.
-8. **CLI failures.** Proposed: a clear message on stderr and a non-zero exit code.
+## Settled decisions
+1. **Actor source.** Require a non-blank `--actor` on `file`, `assign`, `resolve` and `close`. Trim surrounding whitespace. Escalation always records actor `system`; CSV import always records actor `seed`. These are audit labels, not authenticated identities.
+2. **Assigned agent.** Store the agent as free text in `claims.assigned_agent`; no agents table. Require a non-blank `--agent` on `assign` and trim surrounding whitespace. New claims have no assigned agent.
+3. **Assignment and reassignment.** Require an agent on every move into `assigned`, including `escalated → assigned`. That move replaces any previous assigned agent. Reject `assigned → assigned`, so direct reassignment is not supported. Escalation, resolution and closure preserve the stored agent for reference.
+4. **Note.** Set the optional note at filing only; later commands cannot edit it. Store notes as data and never interpret their contents as instructions.
+5. **Seed CSV.** Use the header `passenger,flight,type,tier,note` and invoke as `python main.py seed seed_claims.csv`. All imported claims use the same invocation time (the supplied `--now` or the UTC time captured once by the CLI) and actor `seed`. Reject missing/duplicate/unexpected columns and malformed or invalid rows. Report the CSV line number for row errors, counting the header as line 1. Load all claims and history in one transaction; any validation or write failure rolls back the whole import.
+6. **Escalation atomicity.** Use one transaction per eligible claim. If a claim or history write fails, roll back both for that claim, report its ID and error, and continue with the remaining eligible claims. Return/report only successfully escalated IDs, in ascending order. The CLI exits non-zero if any claim failed, even when others succeeded.
+7. **ID format.** Use SQLite integer autoincrement IDs, without prefixes.
+8. **CLI failures.** Print clear validation, missing-claim, transition and database errors to stderr and exit non-zero. Expected user errors do not print tracebacks. Successful commands exit zero; escalation with no eligible claims is a successful no-op and reports no affected IDs.
+9. **Timezones.** Accept ISO-8601 timestamps with a date, time and explicit `Z` or numeric UTC offset. Reject naive timestamps in both the CLI and rule functions. Normalize to UTC before calculating deadlines or comparing times, and store timestamps consistently with the `+00:00` suffix while preserving fractional seconds. Compare parsed datetimes, not raw timestamp strings. History is ordered by change time, then history ID to break ties.
+10. **Database selection.** Use SQLite at `baggage.db` in the current working directory unless global `--db PATH` is supplied. Open/create the selected database and initialize the schema through `db.py`, enabling foreign keys on every connection. Tests and demonstrations always select temporary databases; database files remain ignored by Git.
 
 ---
 
