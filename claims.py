@@ -7,6 +7,13 @@ CLAIM_TYPES = ("delayed", "lost", "damaged")
 TIERS = ("standard", "silver", "gold")
 STATUSES = ("open", "assigned", "escalated", "resolved", "closed")
 DEADLINE_HOURS = {"gold": 4, "silver": 24, "standard": 72}
+TRANSITIONS = {
+    "open": ("assigned", "escalated"),
+    "assigned": ("resolved", "escalated"),
+    "escalated": ("assigned", "resolved"),
+    "resolved": ("closed",),
+    "closed": (),
+}
 
 
 def to_utc(moment):
@@ -64,6 +71,68 @@ def file_claim(connection, *, passenger, flight, claim_type, tier, actor, now, n
         raise
     connection.execute("COMMIT")
     return claim_id
+
+
+def _change_status(connection, claim_id, new_status, *, actor, now, agent=None):
+    """Move a claim to new_status with its history row in one transaction."""
+    actor = _required_text("actor", actor)
+    if new_status == "assigned":
+        agent = _required_text("agent", agent)
+    changed_at = to_utc(now)
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        row = connection.execute(
+            "SELECT status FROM claims WHERE id = ?", (claim_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"claim {claim_id} not found")
+        old_status = row[0]
+        if new_status not in TRANSITIONS[old_status]:
+            raise ValueError(f"cannot move claim {claim_id} from {old_status} to {new_status}")
+        if new_status == "assigned":
+            connection.execute(
+                "UPDATE claims SET status = ?, assigned_agent = ? WHERE id = ?",
+                (new_status, agent, claim_id),
+            )
+        else:
+            connection.execute(
+                "UPDATE claims SET status = ? WHERE id = ?", (new_status, claim_id)
+            )
+        connection.execute(
+            "INSERT INTO history (claim_id, old_status, new_status, actor, changed_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (claim_id, old_status, new_status, actor, changed_at.isoformat()),
+        )
+    except BaseException:
+        connection.execute("ROLLBACK")
+        raise
+    connection.execute("COMMIT")
+
+
+def assign_claim(connection, claim_id, *, agent, actor, now):
+    """Assign an agent and move the claim to assigned."""
+    _change_status(connection, claim_id, "assigned", agent=agent, actor=actor, now=now)
+
+
+def resolve_claim(connection, claim_id, *, actor, now):
+    """Move the claim to resolved."""
+    _change_status(connection, claim_id, "resolved", actor=actor, now=now)
+
+
+def close_claim(connection, claim_id, *, actor, now):
+    """Move the claim to closed."""
+    _change_status(connection, claim_id, "closed", actor=actor, now=now)
+
+
+def get_history(connection, claim_id):
+    """Return a claim's history ordered by change time, then history ID."""
+    cursor = connection.cursor()
+    cursor.row_factory = sqlite3.Row
+    rows = cursor.execute(
+        "SELECT * FROM history WHERE claim_id = ? ORDER BY id", (claim_id,)
+    ).fetchall()
+    # Compare parsed datetimes (not strings); sort is stable, so ID breaks ties.
+    return sorted(rows, key=lambda row: datetime.fromisoformat(row["changed_at"]))
 
 
 def list_claims(connection, *, status=None, tier=None):
