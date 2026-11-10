@@ -1,9 +1,9 @@
 # Orbit Air Baggage Desk
 
 A baggage claims application backed by SQLite, with a Python CLI planned.
-Schema setup, filing, validation, tier deadlines, initial history, and filtered
-listing are implemented. Assignment, status transitions, escalation, and CLI
-commands are planned for the remaining feature branches.
+Schema setup, filing, validation, tier deadlines, filtered listing, assignment,
+status transitions, and history retrieval are implemented. Overdue escalation
+and CLI commands are planned for the remaining feature branches.
 
 ## Development setup
 
@@ -65,7 +65,7 @@ cases using temporary databases and fixed times. Before implementation, pytest
 collected all 38 cases; all errored during fixture setup with
 `ModuleNotFoundError: No module named 'db'`. The tests were committed separately
 in `be8f54f`, before the implementation. They remained unchanged during the
-implemention..
+implementation.
 
 **What Claude did:** Claude created `db.py` and `claims.py`. `db.py` creates the claims and history tables, including
 CHECK constraints and foreign keys. `claims.py` validates filing inputs, computes
@@ -77,7 +77,7 @@ displayed the diff and left the implementation uncommitted, without changing
 the tests, hooks, or settings.
 
 **Verification:** On 2026-11-10, I reviewed both implementation files and
-the ran:
+then ran:
 
 ```text
 .venv/bin/python -m pytest -q
@@ -96,5 +96,58 @@ insert, producing the expected `sqlite3.IntegrityError`. The transaction was
 closed, and reopening the database confirmed both tables contained zero rows.
 This verified that a failed history write did not leave a persisted claim.
 The check did not alter the committed tests or application code.
+
+No blocking issues were found for this branch.
+
+### feature/assign-and-status
+
+**Scope:** REC-36 — assignment, resolve/close transitions, agent storage, and
+complete, ordered history.
+
+**Prompt given to Claude Code (2026-11-10):**
+
+> Implement feature/assign-and-status from PLAN.md to pass the committed tests. Follow the API documented in tests/test_status.py. Don't edit tests or my hooks/settings. Leave overdue escalation for the next branch. Run the full suite and ruff check ., then show the results and diff. Don't commit yet.
+
+**Tests before implementation:** `tests/test_status.py` adds 35 cases covering
+all five allowed assign/resolve/close transitions, ten forbidden transitions,
+required agents and actors, missing claims, timezone validation, and history
+contents and ordering. Before implementation, the new tests failed because the
+required functions did not exist, while all 38 earlier tests passed. The new
+tests were committed in `5711776` before implementation and remained unchanged.
+
+**What Claude did:** Claude added the lifecycle transition table and a shared
+transaction helper in `claims.py`, with `assign_claim`, `resolve_claim`, and
+`close_claim` wrappers. Assignment stores the trimmed agent and replaces the
+previous agent when assigning an escalated claim. Resolve and close preserve
+the agent. Each successful change adds history with the previous status, new
+status, actor, and UTC timestamp. Invalid operations raise clear errors.
+`get_history` filters by claim and sorts parsed timestamps, breaking ties by
+history ID.
+
+Claude ran the full suite and Ruff, displayed the diff, and left the changes
+uncommitted. Its session output recorded **73 passed in 0.21s** and
+**All checks passed!** Only `claims.py` changed; tests, hooks, and settings were
+untouched. Overdue escalation was left for the next branch.
+
+**Verification:** On 2026-11-10, I reviewed the implementation and ran:
+
+```text
+.venv/bin/python -m pytest -q
+73 passed in 0.19s
+
+.venv/bin/ruff check .
+All checks passed!
+
+git diff --check
+(no output; exit code 0)
+```
+
+**Specific check:** I had history-write failures forced separately for assign,
+resolve, and close using a SQLite trigger in temporary databases. Each operation
+raised the expected `sqlite3.IntegrityError` and closed its transaction. Reopening
+each database confirmed the full claim row, including its status and assigned
+agent, and all history rows matched their values before the attempted change.
+This verified rollback for all three operations without changing the approved
+tests or application code.
 
 No blocking issues were found for this branch.
