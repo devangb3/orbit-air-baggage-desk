@@ -58,6 +58,7 @@ def build_parser():
         cmd.add_argument("--actor", required=True)
 
     commands.add_parser("escalate", help="escalate overdue claims")
+    commands.add_parser("report", help="count open and overdue open/assigned claims by tier")
 
     history_cmd = commands.add_parser("history", help="show a claim's history")
     history_cmd.add_argument("id", type=int)
@@ -126,6 +127,8 @@ def run(args, connection, now):
     elif args.command == "history":
         claims.get_claim(connection, args.id)
         _print_rows(claims.get_history(connection, args.id), HISTORY_COLUMNS)
+    elif args.command == "report":
+        _print_rows(claims.report_claims(connection, now=now), ("tier", "open", "overdue"))
     elif args.command == "seed":
         source = io.StringIO(_read_csv_text(args.csv_path), newline="")
         claim_ids = claims.seed_claims(connection, source, now=now)

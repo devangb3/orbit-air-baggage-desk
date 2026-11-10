@@ -224,6 +224,19 @@ def escalate_claims(connection, *, now):
     return escalated, errors
 
 
+# STRETCH GOAL 2: counts of open and actionable overdue claims by tier.
+def report_claims(connection, *, now):
+    """Count exact open status and overdue open/assigned claims for each tier."""
+    now = to_utc(now)
+    counts = {tier: {"tier": tier, "open": 0, "overdue": 0} for tier in TIERS}
+    for tier, status, deadline in connection.execute(
+        "SELECT tier, status, deadline FROM claims WHERE status IN ('open', 'assigned')"
+    ):
+        counts[tier]["open"] += status == "open"
+        counts[tier]["overdue"] += is_overdue(datetime.fromisoformat(deadline), now=now)
+    return list(counts.values())
+
+
 def parse_timestamp(text):
     """Parse an ISO-8601 timestamp with an explicit Z or UTC offset, as UTC."""
     try:

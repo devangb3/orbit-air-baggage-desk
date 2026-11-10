@@ -4,7 +4,7 @@ A Python command-line baggage claims application backed by SQLite.
 Schema setup, filing, validation, tier deadlines, filtered listing, assignment,
 status transitions, history retrieval, and overdue escalation are implemented.
 The CLI supports filing, listing, assignment, resolution, closure, escalation,
-history, and CSV import.
+history, CSV import, and a per-tier report.
 
 ## Development setup
 
@@ -56,6 +56,56 @@ its actor. The seed command adds the 10 sample claims in one transaction.
 To import into the default database instead, use `python main.py seed seed_claims.csv`.
 Each seed invocation adds new claims; it does not deduplicate earlier imports.
 
+### Report
+
+`report` prints, for each tier, the number of claims with status `open` and the
+number of `open` or `assigned` claims that are overdue (strictly past their
+deadline). Resolved and closed claims are never counted. After seeding at
+13:00 UTC, gold claims (4-hour deadline) are not overdue at 17:00, but are at
+17:01. Assigning one moves it out of `open` while it still counts as overdue:
+
+```text
+$ python main.py --db "$DB" --now 2026-11-10T13:00:00Z seed seed_claims.csv
+Seeded 10 claims: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10
+$ python main.py --db "$DB" --now 2026-11-10T17:00:00Z report
+tier	open	overdue
+standard	3	0
+silver	3	0
+gold	4	0
+$ python main.py --db "$DB" --now 2026-11-10T17:01:00Z report
+tier	open	overdue
+standard	3	0
+silver	3	0
+gold	4	4
+$ python main.py --db "$DB" --now 2026-11-10T17:01:00Z assign 1 --agent Jordan --actor desk1
+Assigned claim 1 to Jordan
+$ python main.py --db "$DB" --now 2026-11-10T17:01:00Z report
+tier	open	overdue
+standard	3	0
+silver	3	0
+gold	3	4
+```
+
+## Docker
+
+The image installs the locked dependencies and contains the app and tests:
+
+```sh
+docker build -t orbit-air-baggage-desk .
+docker run --rm orbit-air-baggage-desk                          # CLI help
+docker run --rm orbit-air-baggage-desk python -m pytest -q      # tests
+docker run --rm orbit-air-baggage-desk ruff check .             # lint
+docker run --rm -v "$PWD/data:/data" orbit-air-baggage-desk \
+  python main.py --db /data/baggage.db report                   # persistent DB
+```
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every pull request (and on pushes to `main`).
+It runs `pytest` and `ruff check .` on Python 3.12 and 3.13 using
+`uv sync --locked`, then builds the Docker image and runs the tests and
+`main.py --help` inside it.
+
 `file`, `assign`, `resolve`, and `close` require `--actor`; `assign` also requires
 `--agent`. Escalation uses actor `system`, and import uses `seed`. CSV files must
 be UTF-8 with exactly the columns `passenger,flight,type,tier,note`; quoted notes
@@ -82,6 +132,28 @@ The tool rejected it with:
 Claude then reported the denial and stopped without trying another method.
 No file contents were returned or printed. This confirmed that the `.env`
 Read deny rule in `.claude/settings.json` worked for the attempted read.
+
+## Test-Edit Guard Hook
+
+`.claude/settings.json` registers `.claude/hooks/protect-tests.py` as a
+`PreToolUse` hook for `Edit`, `Write`, `MultiEdit`, and `NotebookEdit`. It
+exits with status 2 (which blocks the tool call) when the target path is inside
+`tests/`, checking both the given path and its resolved, symlink-free path. If
+the request cannot be parsed, it also blocks.
+
+On 2026-11-10, I asked Claude Code to try the hook with a real edit. Claude
+attempted one `Edit` on `tests/test_bonus.py`, changing only the module
+docstring. The tool call was rejected before any file change:
+
+```text
+PreToolUse:Edit hook error: ["$CLAUDE_PROJECT_DIR"/.venv/bin/python "$CLAUDE_PROJECT_DIR"/.claude/hooks/protect-tests.py]: Blocked: tests/ is protected. Ask the user to review any test changes.
+```
+
+Afterwards, `head -1 tests/test_bonus.py` still showed the original docstring and
+`git diff tests/` was empty. The hook only guards Claude's file-edit tools; edits
+made by a human editor or through shell commands are not intercepted.
+`tests/test_bonus.py` also exercises the hook directly with blocked and allowed
+paths.
 
 ## Linear Issues
 
