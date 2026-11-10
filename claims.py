@@ -43,6 +43,9 @@ def insert_claim(connection, *, passenger, flight, claim_type, tier, actor, now,
     claim_type = _choice("type", claim_type, CLAIM_TYPES)
     tier = _choice("tier", tier, TIERS)
     actor = _required_text("actor", actor)
+    # An omitted or blank note is stored as NULL; any other note is kept verbatim.
+    if note is not None and not note.strip():
+        note = None
     filed_at = to_utc(now)
     deadline = filed_at + timedelta(hours=DEADLINE_HOURS[tier])
     cursor = connection.execute(
@@ -108,11 +111,12 @@ def _change_status(connection, claim_id, new_status, *, actor, now, agent=None):
         connection.execute("ROLLBACK")
         raise
     connection.execute("COMMIT")
+    return agent
 
 
 def assign_claim(connection, claim_id, *, agent, actor, now):
-    """Assign an agent and move the claim to assigned."""
-    _change_status(connection, claim_id, "assigned", agent=agent, actor=actor, now=now)
+    """Assign an agent and move the claim to assigned. Returns the stored agent."""
+    return _change_status(connection, claim_id, "assigned", agent=agent, actor=actor, now=now)
 
 
 def resolve_claim(connection, claim_id, *, actor, now):
@@ -312,10 +316,10 @@ def seed_claims(connection, source, *, now):
                 claim_ids.append(insert_claim(
                     connection, passenger=record["passenger"], flight=record["flight"],
                     claim_type=record["type"], tier=record["tier"], actor=SEED_ACTOR,
-                    now=filed_at, note=record["note"] or None,
+                    now=filed_at, note=record["note"],
                 ))
             except (ValueError, sqlite3.Error) as error:
-                raise type(error)(f"line {line}: {error}") from error
+                raise ValueError(f"line {line}: {error}") from error
     except BaseException:
         connection.execute("ROLLBACK")
         raise

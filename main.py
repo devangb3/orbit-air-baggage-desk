@@ -1,6 +1,7 @@
 """Command-line interface for the baggage desk. Parsing and output only."""
 
 import argparse
+import io
 import sqlite3
 import sys
 from datetime import UTC, datetime
@@ -14,6 +15,8 @@ CLAIM_COLUMNS = (
     "assigned_agent", "filed_at", "deadline", "note",
 )
 HISTORY_COLUMNS = ("changed_at", "old_status", "new_status", "actor")
+# Escape the backslash first so escaped output stays unambiguous.
+_CELL_ESCAPES = str.maketrans({"\\": "\\\\", "\t": "\\t", "\n": "\\n", "\r": "\\r"})
 
 
 class CliError(Exception):
@@ -64,10 +67,29 @@ def build_parser():
     return parser
 
 
+def _cell(value):
+    """Render one value so it cannot break the one-row-per-line, tab-separated output."""
+    return "" if value is None else str(value).translate(_CELL_ESCAPES)
+
+
 def _print_rows(rows, columns):
     print("\t".join(columns))
     for row in rows:
-        print("\t".join("" if row[c] is None else str(row[c]) for c in columns))
+        print("\t".join(_cell(row[c]) for c in columns))
+
+
+def _read_csv_text(path):
+    """Read a seed file as UTF-8, naming the line of any undecodable byte."""
+    try:
+        with open(path, "rb") as source:
+            raw = source.read()
+    except OSError as error:
+        raise CliError(f"cannot read {path}: {error.strerror or error}") from None
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError as error:
+        line = raw.count(b"\n", 0, error.start) + 1
+        raise CliError(f"line {line}: {path} is not valid UTF-8 ({error.reason})") from None
 
 
 def run(args, connection, now):
@@ -83,8 +105,9 @@ def run(args, connection, now):
         _print_rows(claims.list_claims(connection, status=args.status, tier=args.tier),
                     CLAIM_COLUMNS)
     elif args.command == "assign":
-        claims.assign_claim(connection, args.id, agent=args.agent, actor=args.actor, now=now)
-        print(f"Assigned claim {args.id} to {args.agent.strip()}")
+        agent = claims.assign_claim(connection, args.id, agent=args.agent, actor=args.actor,
+                                    now=now)
+        print(f"Assigned claim {args.id} to {agent}")
     elif args.command == "resolve":
         claims.resolve_claim(connection, args.id, actor=args.actor, now=now)
         print(f"Resolved claim {args.id}")
@@ -104,11 +127,8 @@ def run(args, connection, now):
         claims.get_claim(connection, args.id)
         _print_rows(claims.get_history(connection, args.id), HISTORY_COLUMNS)
     elif args.command == "seed":
-        try:
-            with open(args.csv_path, newline="", encoding="utf-8-sig") as source:
-                claim_ids = claims.seed_claims(connection, source, now=now)
-        except OSError as error:
-            raise CliError(f"cannot read {args.csv_path}: {error.strerror or error}") from None
+        source = io.StringIO(_read_csv_text(args.csv_path), newline="")
+        claim_ids = claims.seed_claims(connection, source, now=now)
         print(f"Seeded {len(claim_ids)} claims: " + ", ".join(map(str, claim_ids)))
     return 0
 
@@ -116,7 +136,7 @@ def run(args, connection, now):
 def main(argv=None):
     try:
         args = build_parser().parse_args(argv)
-        now = claims.parse_timestamp(args.now) if args.now else datetime.now(UTC)
+        now = claims.parse_timestamp(args.now) if args.now is not None else datetime.now(UTC)
         connection = connect_db(args.db)
         try:
             init_db(connection)

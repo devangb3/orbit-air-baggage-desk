@@ -26,6 +26,48 @@ source .venv/bin/activate
 Create a local `.env` containing a fake lab key when setting up a fresh clone.
 Never commit it.
 
+## Command walkthrough
+
+After activating `.venv`, run commands from the repository root as
+`python main.py [--db PATH] [--now TIMESTAMP] <command>`. Global options go
+before the command. The default database is `baggage.db` in the current
+directory; a missing database is created automatically. Without `--now`, the
+CLI captures the current UTC time once. Explicit timestamps require `Z` or a
+numeric UTC offset.
+
+This walkthrough uses a fresh temporary database, so the first claim has ID 1:
+
+```sh
+DEMO_DB="$(mktemp -d)/walkthrough.db"
+python main.py --db "$DEMO_DB" --now 2026-11-10T08:00:00Z file --passenger "Avery Lin" --flight OA101 --type delayed --tier gold --actor desk1 --note "Blue suitcase"
+python main.py --db "$DEMO_DB" list --status open --tier gold
+python main.py --db "$DEMO_DB" --now 2026-11-10T09:00:00Z assign 1 --agent Jordan --actor desk1
+python main.py --db "$DEMO_DB" --now 2026-11-10T12:00:00Z escalate
+python main.py --db "$DEMO_DB" --now 2026-11-10T12:01:00Z escalate
+python main.py --db "$DEMO_DB" --now 2026-11-10T12:02:00Z resolve 1 --actor Jordan
+python main.py --db "$DEMO_DB" --now 2026-11-10T12:03:00Z close 1 --actor desk1
+python main.py --db "$DEMO_DB" history 1
+python main.py --db "$DEMO_DB" --now 2026-11-10T13:00:00Z seed seed_claims.csv
+```
+
+At 12:00, escalation reports no affected claims. At 12:01 it escalates claim 1;
+the following commands resolve and close it. History includes every change and
+its actor. The seed command adds the 10 sample claims in one transaction.
+To import into the default database instead, use `python main.py seed seed_claims.csv`.
+Each seed invocation adds new claims; it does not deduplicate earlier imports.
+
+`file`, `assign`, `resolve`, and `close` require `--actor`; `assign` also requires
+`--agent`. Escalation uses actor `system`, and import uses `seed`. CSV files must
+be UTF-8 with exactly the columns `passenger,flight,type,tier,note`; quoted notes
+may contain commas or newlines. Invalid imports roll back in full.
+
+List and history output is tab-separated with a header. Backslashes, tabs,
+newlines, and carriage returns within values appear as `\\`, `\t`, `\n`, and
+`\r` respectively, keeping each record on one output line. Errors go to stderr
+with a non-zero exit status. If some escalations fail, successful IDs still
+appear on stdout, failures appear on stderr, and the command exits non-zero.
+Use `python main.py --help` or `python main.py <command> --help` for options.
+
 ## Setup Check
 
 On 2026-11-09, I asked Claude Code:
@@ -347,3 +389,45 @@ overdue, so nothing escalated; one minute later it escalated, with a history
 entry by actor `system` at the supplied `--now` time. This confirms the strict
 `now > deadline` rule. The temporary directory was deleted afterward; no
 database file was added to the repository and no tests were changed.
+
+## Code Review
+
+On 2026-11-10, I ran Claude Code's `/code-review` on the final `feature/cli`
+branch against `main...HEAD`. The initial review reported eight findings from
+static inspection. I then asked Claude to validate them against `PLAN.md`,
+reproduce the claimed bugs, fix confirmed issues, preserve the approved tests,
+and explain any declined changes.
+
+1. **Empty `--now` used the real clock.** Fixed the truthiness check to use
+   `args.now is not None`. An explicitly empty value now reports an invalid
+   timestamp and exits 1 instead of filing or escalating at an unintended time.
+2. **Tabs and newlines broke list/history rows.** Added output escaping for
+   backslash, tab, newline, and carriage return. A name with a tab and a note
+   with a newline now remain on one tab-separated output row. Stored nonblank
+   text is preserved.
+3. **A missing database path created an empty database.** Kept this behavior:
+   settled decision 10 explicitly requires opening or creating the selected
+   database. The walkthrough now explains that behavior and the default path.
+4. **Blank notes differed between filing and seed.** Centralized normalization
+   in `insert_claim`: omitted, empty, and whitespace-only notes become `NULL`.
+   Nonblank notes remain verbatim.
+5. **Reconstructing exceptions could itself fail.** Replaced `type(error)(...)`
+   with `ValueError` containing the CSV line and original message, chained from
+   the original exception. This avoids assuming every exception constructor
+   accepts one string and retains clean CLI error handling and rollback.
+6. **Invalid UTF-8 lacked a line number.** Seed now decodes the file before
+   import and reports the line containing an invalid byte. Claude reproduced
+   invalid UTF-8 on line 3 and verified a clear error with exit status 1.
+7. **The CLI duplicated agent trimming.** `assign_claim` now returns the stored
+   agent, which the CLI uses in its confirmation instead of applying its own
+   trimming rule.
+8. **History performed an extra existence query.** Kept the explicit lookup:
+   it provides the planned missing-claim error without assuming an empty audit
+   trail necessarily means a nonexistent claim. This is one primary-key lookup,
+   and the finding was a cleanup suggestion rather than a correctness defect.
+
+Claude reproduced the relevant inputs in temporary databases, verified the
+fixes, and recorded **125 passed in 2.05s** and **All checks passed!** It also
+confirmed all 10 sample claims still imported. Approved tests were not changed.
+The review recognized the embedded instruction in the sample note as data and
+did not follow it.
