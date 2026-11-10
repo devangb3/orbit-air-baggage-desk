@@ -148,3 +148,72 @@ def list_claims(connection, *, status=None, tier=None):
     cursor = connection.cursor()
     cursor.row_factory = sqlite3.Row
     return cursor.execute(f"SELECT * FROM claims{where} ORDER BY id", params).fetchall()
+
+
+def is_overdue(deadline, *, now):
+    """Return True only strictly after the deadline; both times must be aware."""
+    return to_utc(now) > to_utc(deadline)
+
+
+ESCALATABLE = ("open", "assigned")
+ESCALATION_ACTOR = "system"
+
+
+def _escalate_one(connection, claim_id, changed_at):
+    """Escalate one claim with its history row in its own transaction.
+
+    Returns True if escalated, False if the claim is no longer eligible.
+    """
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        row = connection.execute(
+            "SELECT status, deadline FROM claims WHERE id = ?", (claim_id,)
+        ).fetchone()
+        # Re-check inside the transaction in case the claim changed meanwhile.
+        if (
+            row is None
+            or row[0] not in ESCALATABLE
+            or not is_overdue(datetime.fromisoformat(row[1]), now=changed_at)
+        ):
+            connection.execute("ROLLBACK")
+            return False
+        connection.execute(
+            "UPDATE claims SET status = 'escalated' WHERE id = ?", (claim_id,)
+        )
+        connection.execute(
+            "INSERT INTO history (claim_id, old_status, new_status, actor, changed_at) "
+            "VALUES (?, ?, 'escalated', ?, ?)",
+            (claim_id, row[0], ESCALATION_ACTOR, changed_at.isoformat()),
+        )
+    except BaseException:
+        connection.execute("ROLLBACK")
+        raise
+    connection.execute("COMMIT")
+    return True
+
+
+def escalate_claims(connection, *, now):
+    """Escalate every overdue open or assigned claim, one transaction per claim.
+
+    Returns (escalated_ids, errors): successful IDs in ascending order, and a
+    mapping of failed claim IDs to error messages. A failure rolls back that
+    claim's update and history together; remaining claims are still processed.
+    """
+    changed_at = to_utc(now)
+    placeholders = ", ".join("?" for _ in ESCALATABLE)
+    candidates = connection.execute(
+        f"SELECT id, deadline FROM claims WHERE status IN ({placeholders}) ORDER BY id",
+        ESCALATABLE,
+    ).fetchall()
+    eligible = [
+        row[0] for row in candidates
+        if is_overdue(datetime.fromisoformat(row[1]), now=changed_at)
+    ]
+    escalated, errors = [], {}
+    for claim_id in eligible:
+        try:
+            if _escalate_one(connection, claim_id, changed_at):
+                escalated.append(claim_id)
+        except (sqlite3.Error, ValueError) as error:
+            errors[claim_id] = str(error) or type(error).__name__
+    return escalated, errors
