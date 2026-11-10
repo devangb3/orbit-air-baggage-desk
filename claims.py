@@ -1,5 +1,6 @@
 """Business rules for baggage claims. Never reads the clock."""
 
+import csv
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
@@ -217,3 +218,106 @@ def escalate_claims(connection, *, now):
         except (sqlite3.Error, ValueError) as error:
             errors[claim_id] = str(error) or type(error).__name__
     return escalated, errors
+
+
+def parse_timestamp(text):
+    """Parse an ISO-8601 timestamp with an explicit Z or UTC offset, as UTC."""
+    try:
+        moment = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"invalid timestamp {text!r}: use ISO-8601 with a date, time and Z or UTC offset"
+        ) from None
+    if moment.tzinfo is None or moment.utcoffset() is None:
+        raise ValueError(
+            f"invalid timestamp {text!r}: an explicit Z or UTC offset is required"
+        )
+    return moment.astimezone(UTC)
+
+
+def get_claim(connection, claim_id):
+    """Return the claim row, or raise ValueError if it does not exist."""
+    cursor = connection.cursor()
+    cursor.row_factory = sqlite3.Row
+    row = cursor.execute("SELECT * FROM claims WHERE id = ?", (claim_id,)).fetchone()
+    if row is None:
+        raise ValueError(f"claim {claim_id} not found")
+    return row
+
+
+SEED_HEADER = ("passenger", "flight", "type", "tier", "note")
+SEED_ACTOR = "seed"
+
+
+def _next_record(reader, line):
+    """Return the next parsed CSV record, naming the line if the CSV is malformed."""
+    try:
+        return next(reader, None)
+    except csv.Error as error:
+        raise ValueError(f"line {line}: malformed CSV: {error}") from error
+
+
+def _seed_records(source):
+    """Yield (line_number, row) pairs, validating the header and row widths.
+
+    Parsing is strict, so malformed CSV such as an unterminated quoted field is
+    rejected instead of silently absorbing the rest of the file. Line numbers
+    count the header as line 1 and give the physical line where each record
+    starts, so quoted multi-line notes do not misreport later rows.
+    """
+    reader = csv.reader(source, strict=True)
+    header = _next_record(reader, 1)
+    if header is None:
+        raise ValueError("CSV file is empty; expected header: " + ",".join(SEED_HEADER))
+    duplicates = sorted({name for name in header if header.count(name) > 1})
+    missing = [name for name in SEED_HEADER if name not in header]
+    unexpected = [name for name in header if name not in SEED_HEADER]
+    if duplicates or missing or unexpected:
+        problems = []
+        if missing:
+            problems.append(f"missing columns: {', '.join(missing)}")
+        if duplicates:
+            problems.append(f"duplicate columns: {', '.join(duplicates)}")
+        if unexpected:
+            problems.append(f"unexpected columns: {', '.join(unexpected)}")
+        raise ValueError(
+            f"invalid CSV header ({'; '.join(problems)}); expected: {','.join(SEED_HEADER)}"
+        )
+    while True:
+        start = reader.line_num + 1
+        record = _next_record(reader, start)
+        if record is None:
+            return
+        if not record:
+            continue
+        if len(record) != len(header):
+            raise ValueError(
+                f"line {start}: expected {len(header)} columns, got {len(record)}"
+            )
+        yield start, dict(zip(header, record, strict=True))
+
+
+def seed_claims(connection, source, *, now):
+    """File every CSV record in one transaction; any failure rolls back all.
+
+    `source` is an open text file (opened with newline=""). All claims share
+    `now` and the actor "seed". Returns the new claim IDs in file order.
+    """
+    filed_at = to_utc(now)
+    claim_ids = []
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        for line, record in _seed_records(source):
+            try:
+                claim_ids.append(insert_claim(
+                    connection, passenger=record["passenger"], flight=record["flight"],
+                    claim_type=record["type"], tier=record["tier"], actor=SEED_ACTOR,
+                    now=filed_at, note=record["note"] or None,
+                ))
+            except (ValueError, sqlite3.Error) as error:
+                raise type(error)(f"line {line}: {error}") from error
+    except BaseException:
+        connection.execute("ROLLBACK")
+        raise
+    connection.execute("COMMIT")
+    return claim_ids
