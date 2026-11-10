@@ -2,8 +2,8 @@
 
 A baggage claims application backed by SQLite, with a Python CLI planned.
 Schema setup, filing, validation, tier deadlines, filtered listing, assignment,
-status transitions, and history retrieval are implemented. Overdue escalation
-and CLI commands are planned for the remaining feature branches.
+status transitions, history retrieval, and overdue escalation are implemented.
+CLI commands are planned for the final feature branch.
 
 ## Development setup
 
@@ -151,3 +151,69 @@ This verified rollback for all three operations without changing the approved
 tests or application code.
 
 No blocking issues were found for this branch.
+
+### feature/deadlines-and-escalation
+
+**Scope:** REC-37 — strict overdue boundaries, eligible-claim escalation,
+escalation history, and rollback with continued processing of other claims.
+
+**Prompt given to Claude Code (2026-11-10):**
+
+> Implement feature/deadlines-and-escalation from PLAN.md to pass the committed tests. Follow the API documented in tests/test_escalation.py. Don't edit tests or hooks/settings. Run the full suite and ruff check ., then show results and diff.
+>
+> Also verify the rollback test fails when transaction protection is temporarily removed. Restore the correct code and rerun it. Show both results. Don't commit yet.
+
+**Tests before implementation:** `tests/test_escalation.py` adds 23 cases. They
+cover one minute before, exactly at, and one minute after the deadline for every
+tier, plus one second after; eligible statuses; complete history; repeated runs;
+timezone handling; and per-claim rollback. Before implementation, these 23 tests
+failed because the required functions were missing, while the existing 73 tests
+passed. Test commit `943008b` precedes implementation. Approved tests remained
+unchanged.
+
+**What Claude did:** Claude added `is_overdue`, `_escalate_one`, and
+`escalate_claims` to `claims.py`. Overdue means strictly `now > deadline`, with
+aware timestamps compared as UTC instants. Only overdue open/assigned claims
+escalate. Each claim has its own transaction and a history entry with actor
+`system`; eligibility is rechecked inside the transaction. Successful IDs are
+returned in ascending order. A failed claim rolls back and its ID/error is
+reported while processing continues for the other claims. The CLI remains the
+next branch's scope.
+
+**Specific check — rollback mutation:** I asked Claude to demonstrate that the
+rollback tests detect missing transaction protection. Claude temporarily removed
+`BEGIN IMMEDIATE`, both `ROLLBACK` statements, and `COMMIT` from `_escalate_one`.
+With SQLite autocommit enabled, the claim update then persisted even when the
+history insert failed. Both tests failed at the persisted-state assertion:
+
+```text
+FAILED test_history_failure_rolls_back_claim_and_continues_batch[open]
+FAILED test_history_failure_rolls_back_claim_and_continues_batch[assigned]
+2 failed, 21 deselected in 0.05s
+```
+
+Claude restored the correct code and reran the same tests:
+
+```text
+2 passed, 21 deselected in 0.04s
+```
+
+The restored full suite then reported **96 passed in 0.25s**, and Ruff reported
+**All checks passed!** The tests were not weakened or edited, and the temporary
+broken implementation was not committed.
+
+**Verification:** I had the restored implementation checked again on 2026-11-10:
+
+```text
+.venv/bin/python -m pytest -q
+96 passed in 0.20s
+
+.venv/bin/ruff check .
+All checks passed!
+
+git diff --check
+(no output; exit code 0)
+```
+
+The results confirm the strict deadline boundary and that a failed claim retains
+its previous state while other eligible claims still escalate successfully.
