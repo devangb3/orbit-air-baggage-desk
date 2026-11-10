@@ -1,0 +1,14 @@
+*
+!Dockerfile
+!pyproject.toml
+!uv.lock
+!.python-version
+!claims.py
+!db.py
+!main.py
+!seed_claims.csv
+!tests/
+!tests/*.py
+!.claude/
+!.claude/hooks/
+!.claude/hooks/protect-tests.py
