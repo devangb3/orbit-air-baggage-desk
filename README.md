@@ -312,3 +312,38 @@ rules in `.claude/settings.json` provide an additional safeguard for that tool;
 the earlier Setup Check records an actual blocked Read attempt. This interaction
 demonstrates that Claude ignored the embedded instruction, rather than a new
 permission denial, because it never attempted to read `.env`.
+
+## Overdue Demonstration
+
+On 2026-11-10, I had the `--now` option demonstrated against a fresh temporary
+database created with `mktemp -d` (path referred to as `$DB` below). A gold
+claim was filed at 08:00 UTC, giving a 12:00 UTC deadline. Escalation was then
+attempted exactly at the deadline and one minute after it.
+
+```text
+$ DB="$(mktemp -d)/demo.db"
+
+$ .venv/bin/python main.py --db "$DB" --now 2026-11-10T08:00:00Z file --passenger "Avery Lin" --flight OA101 --type delayed --tier gold --actor desk1 --note "Demo gold claim"
+Filed claim 1
+
+$ .venv/bin/python main.py --db "$DB" --now 2026-11-10T12:00:00Z escalate
+No claims escalated
+
+$ .venv/bin/python main.py --db "$DB" --now 2026-11-10T12:01:00Z escalate
+Escalated claims: 1
+
+$ .venv/bin/python main.py --db "$DB" list --status escalated
+id	passenger	flight	type	tier	status	assigned_agent	filed_at	deadline	note
+1	Avery Lin	OA101	delayed	gold	escalated		2026-11-10T08:00:00+00:00	2026-11-10T12:00:00+00:00	Demo gold claim
+
+$ .venv/bin/python main.py --db "$DB" history 1
+changed_at	old_status	new_status	actor
+2026-11-10T08:00:00+00:00		open	desk1
+2026-11-10T12:01:00+00:00	open	escalated	system
+```
+
+Every command exited with status 0. At exactly 4 hours the claim was not
+overdue, so nothing escalated; one minute later it escalated, with a history
+entry by actor `system` at the supplied `--now` time. This confirms the strict
+`now > deadline` rule. The temporary directory was deleted afterward; no
+database file was added to the repository and no tests were changed.
