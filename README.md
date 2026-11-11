@@ -32,8 +32,10 @@ After activating `.venv`, run commands from the repository root as
 `python main.py [--db PATH] [--now TIMESTAMP] <command>`. Global options go
 before the command. The default database is `baggage.db` in the current
 directory; a missing database is created automatically. Without `--now`, the
-CLI captures the current UTC time once. Explicit timestamps require `Z` or a
-numeric UTC offset.
+CLI captures the current UTC time once. Timestamps may include `Z` or a numeric
+UTC offset; timezone-free values are interpreted as UTC. For example,
+`--now 2026-11-02T14:00:00` means the same instant as
+`--now 2026-11-02T14:00:00Z`. A date and time are required.
 
 This walkthrough uses a fresh temporary database, so the first claim has ID 1:
 

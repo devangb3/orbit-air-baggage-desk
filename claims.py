@@ -238,17 +238,18 @@ def report_claims(connection, *, now):
 
 
 def parse_timestamp(text):
-    """Parse an ISO-8601 timestamp with an explicit Z or UTC offset, as UTC."""
+    """Parse an ISO-8601 date and time as UTC; a missing offset means UTC."""
     try:
         moment = datetime.fromisoformat(text)
+        if len(text) <= 10:
+            raise ValueError("a time is required")
     except (TypeError, ValueError):
         raise ValueError(
-            f"invalid timestamp {text!r}: use ISO-8601 with a date, time and Z or UTC offset"
+            f"invalid timestamp {text!r}: use ISO-8601 with a date and time "
+            "(a missing UTC offset defaults to UTC)"
         ) from None
-    if moment.tzinfo is None or moment.utcoffset() is None:
-        raise ValueError(
-            f"invalid timestamp {text!r}: an explicit Z or UTC offset is required"
-        )
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
     return moment.astimezone(UTC)
 
 

@@ -162,7 +162,7 @@ def test_now_controls_exact_deadline_then_escalation(cli, db_path):
     assert "Avery Unique" in success(cli("list", "--status", "escalated"))
 
 
-@pytest.mark.parametrize("now", ["not-a-date", "2026-11-10T09:00:00"])
+@pytest.mark.parametrize("now", ["not-a-date", "", "2026-11-10"])
 def test_invalid_now_is_clear_and_does_not_write(cli, db_path, now):
     failure(cli(*file_args(), now=now))
     assert rows(db_path, "claims") == []
@@ -172,6 +172,20 @@ def test_invalid_now_is_clear_and_does_not_write(cli, db_path, now):
 def test_now_accepts_explicit_offset(cli, db_path):
     success(cli(*file_args(), now="2026-11-10T14:30:00+05:30"))
     assert rows(db_path, "claims")[0]["filed_at"] == STORED_NOW
+
+
+def test_timezone_free_now_uses_utc_for_filing_and_escalation(cli, db_path):
+    success(cli(*file_args(), now="2026-11-02T10:00:00"))
+    claim = rows(db_path, "claims")[0]
+    assert claim["filed_at"] == "2026-11-02T10:00:00+00:00"
+    assert claim["deadline"] == "2026-11-02T14:00:00+00:00"
+    # The assignment's exact timestamp is the deadline, so no escalation yet.
+    success(cli("escalate", now="2026-11-02T14:00:00"))
+    assert rows(db_path, "claims")[0]["status"] == "open"
+    assert len(rows(db_path, "history")) == 1
+    success(cli("escalate", now="2026-11-02T14:01:00"))
+    assert rows(db_path, "claims")[0]["status"] == "escalated"
+    assert rows(db_path, "history")[-1]["changed_at"] == "2026-11-02T14:01:00+00:00"
 
 
 @pytest.mark.parametrize(
