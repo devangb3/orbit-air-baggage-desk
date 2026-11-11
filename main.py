@@ -32,7 +32,7 @@ class _Parser(argparse.ArgumentParser):
 def build_parser():
     parser = _Parser(prog="main.py", description="Orbit Air Baggage Desk")
     parser.add_argument("--db", default=DEFAULT_DB, help="SQLite database path")
-    parser.add_argument("--now", help="ISO-8601 timestamp with Z or UTC offset")
+    parser.add_argument("--now", help="ISO-8601 date and time; missing timezone defaults to UTC")
     commands = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
 
     file_cmd = commands.add_parser("file", help="file a new claim")
